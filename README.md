@@ -48,7 +48,7 @@
 - **无后缀链接也能识别** — 「自动」模式先看后缀，没有后缀时用 `HEAD` 读响应的 `Content-Type` 判断是图片还是视频。
 - **防盗链兼容** — 部分站点会拒绝带来源页的视频请求（返回 403）。直连失败时，会改用不带来源的受限请求（上限 32MB）读成本地 blob 再播放，不经过任何代理。站点不允许跨站读取时，会提示改用本地文件。
 - **壁纸层 + 遮罩层** — 壁纸固定在 `z-index:-2`，遮罩在 `z-index:-1`；遮罩自动跟随明暗主题（浅色用白纱，深色用黑纱）。
-- **毛玻璃面板** — 对卡片、弹层、输入区等面板做半透明 + `backdrop-filter` 模糊。**侧边栏除外**：它在收起时动画 `width`，对宽度动画中的元素加 `backdrop-filter` 会让浏览器每帧重新采样背景，造成收起卡顿；OpenChamber 本身也有 glass 系统，侧边栏只保留半透明填充。
+- **毛玻璃面板** — 对卡片、输入区等浮在壁纸上的面板做半透明 + 毛玻璃。遵循「完整配方」：每个上玻璃的面都同时有**半透明填充 + 高光 + 模糊链**（`blur + saturate + brightness + contrast`，明暗两套校准），不会出现"只有透明没有磨砂"的平透明。**阅读面明确排除**：下拉菜单、弹层、对话框、提示气泡保持官方不透明，避免文字在壁纸上发白难读。**侧边栏除外**：它在收起时动画 `width`，对宽度动画中的元素加 `backdrop-filter` 会让浏览器每帧重新采样背景，造成收起卡顿，所以侧边栏只保留半透明填充、不加滤镜。
 - **实时调节** — 壁纸不透明度、遮罩强度、面板不透明度、毛玻璃模糊、壁纸模糊、填充方式（铺满 / 完整显示）。
 - **弱网回退** — `navigator.connection` 报告省流量或 2G / slow-2G 时暂停视频并显示首帧，避免在弱网设备上白耗流量。
 - **首帧海报** — 视频首帧生成 poster，消除黑屏闪烁；暂停时显示这一帧。本地视频的 poster 也存 IndexedDB。
@@ -87,12 +87,12 @@ npm root -g        # 全局 node_modules 路径，再拼 /@openchamber/web/dist
 <link rel="stylesheet" href="/oc-bg-fonts/noto-sans-sc/index.css">
 
 <!-- 放在 </body> 前 -->
-<script src="/oc-bg.js?v=11"></script>
+<script src="/oc-bg.js?v=12"></script>
 ```
 
 ### 4. 刷新页面
 
-`?v=11` 是缓存版本号。改代码后把它递增（`v=12`、`v=13`……）即可让浏览器重新拉取；必要时再用 Ctrl+Shift+R 强制刷新。
+`?v=12` 是缓存版本号。改代码后把它递增（`v=13`、`v=14`……）即可让浏览器重新拉取；必要时再用 Ctrl+Shift+R 强制刷新。
 
 > 注意：这是直接改动 `@openchamber/web` 的 `dist`。升级 OpenChamber 会覆盖 `dist`，需要重新安装一次。
 
@@ -128,7 +128,9 @@ npm root -g        # 全局 node_modules 路径，再拼 /@openchamber/web/dist
 - 用 `MutationObserver` 监听 DOM，把设置区块插到「外观」页的 `[data-settings-item="appearance.session-activity"]` 之前。
 - 设置写入 `localStorage`，启动时读取并做范围钳制；本地图片 / 视频与视频 poster 存 IndexedDB。
 - 背景通过 `<html>` 上的 `data-ocbg` / `data-ocbg-glass` / `data-ocbg-playing` / `data-ocbg-poster` 属性开关，具体样式由注入的 `<style id="ocbg-style">` 提供。
-- 面板半透明用 `color-mix(in srgb, var(--token) var(--ocbg-panel-opacity), transparent)`，只在 `.bg-card`、`.bg-popover`、`.bg-sidebar` 等面板类上生效；毛玻璃滤镜只加在真正的面板上，避免给每个按钮都上滤镜。侧边栏 `aside.bg-sidebar` 被显式排除在 `backdrop-filter` 之外（它在收起时动画 `width`）。
+- 面板半透明用 `color-mix(in srgb, var(--token) var(--ocbg-panel-opacity), transparent)`，只作用于浮在壁纸上的面板（`.bg-card`、`.bg-secondary`、`.bg-muted`、`.oc-glass-composer` / `.oc-glass-floating`、`.bg-sidebar`）。每个上玻璃的面都带完整配方：半透明填充 + 高光渐变 + `backdrop-filter: blur(...) saturate(...) brightness(...) contrast(1.01)`，明暗两套曝光校准写在 CSS 里（`html[data-ocbg-glass]` 与 `.dark`），切换主题无需 JS 重绘。
+- 阅读面**不做**半透明、不加滤镜：`.bg-popover`、`.oc-glass-popover`、`.oc-glass-tooltip`、`.oc-glass-panel` 保持宿主/官方的不透明画法，保证菜单、对话框、提示气泡里的文字在壁纸上依然清晰。侧边栏 `aside.bg-sidebar` 只做半透明填充，显式排除 `backdrop-filter`（它在收起时动画 `width`）。
+- 桌面应用里，注入的全屏层会加 `-webkit-app-region: initial`（不是 `none`），避免挡住窗口拖拽 / 双击最大化。这条依据参考项目的实测记录，本机 Web 版无法验证。
 - 视频播放时置 `data-ocbg-playing`，临时关掉壁纸 `filter` 与面板 `backdrop-filter`，把合成放回浏览器默认路径，避免每帧重绘；同时把壁纸层不透明度取整为 1，让视频更可能进入硬件叠加，淡化效果改由遮罩承担。
 - 图片经 `Image()` 预加载校验；视频直连失败时按上文的兼容路径重试。
 

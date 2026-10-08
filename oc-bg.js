@@ -13,7 +13,7 @@
   window.__OCBG__ = true;
 
   var STORE_KEY = "ocbg.settings.v2";
-  var VERSION = "11";
+  var VERSION = "12";
   var PRESET = "https://haowallpaper.com/link/common/file/previewFileImg/16445310248537472";
   var LOCAL_PRESET = "/oc-bg-wallpaper.webp";
   var IDB_NAME = "ocbg";
@@ -288,31 +288,48 @@
     /* Read the host tokens without replacing them: the app owns theme updates. */
     "html[data-ocbg] body{background-color:var(--surface-background)!important;}",
     "html[data-ocbg] #root,html[data-ocbg] #root .bg-background{background-color:transparent!important;}",
-    "html[data-ocbg-glass] .bg-card{background-color:color-mix(in srgb,var(--card) var(--ocbg-panel-opacity),transparent)!important;}",
-    "html[data-ocbg-glass] .bg-popover{background-color:color-mix(in srgb,var(--popover) var(--ocbg-panel-opacity),transparent)!important;}",
-    "html[data-ocbg-glass] .bg-sidebar{background-color:color-mix(in srgb,var(--sidebar) var(--ocbg-panel-opacity),transparent)!important;}",
+    /* Desktop app-region guard. In the desktop shell the window-drag rows are
+       collected by geometry, and a full-viewport body child that follows #root
+       would swallow the drag surface. `initial` (NOT `none`, which maps onto
+       no-drag) keeps these decorative layers out of that composition. */
+    "html[data-ocbg] body>.ocbg-layer,html[data-ocbg] body>.ocbg-scrim{-webkit-app-region:initial!important;}",
+    /* ---- Frosted glass: whitelisted panels only -------------------------
+       Every glassed surface carries the FULL recipe (translucent fill + sheen
+       + blur chain). Reading surfaces are deliberately excluded: popovers,
+       menus, dialogs and tooltips keep their official opaque paint so text
+       stays legible over any wallpaper. The sidebar keeps the fill but no
+       filter (see the note below). */
+    /* Exposure + sheen calibrated per scheme in CSS so a live theme toggle
+       repaints with no JS: light glass dims a touch (a positive brightness
+       gain would clip bright wallpapers), dark glass keeps a slight lift. */
+    "html[data-ocbg-glass]{--ocbg-glass-brightness:.98;--ocbg-glass-sheen:.07;--ocbg-glass-sheen-mid:.02;}",
+    "html[data-ocbg-glass].dark{--ocbg-glass-brightness:1.04;--ocbg-glass-sheen:.16;--ocbg-glass-sheen-mid:.05;}",
+    "html[data-ocbg-glass] .bg-card,html[data-ocbg-glass] .oc-glass-composer,html[data-ocbg-glass] .oc-glass-floating{",
+    "background-color:color-mix(in srgb,var(--surface-elevated) var(--ocbg-panel-opacity),transparent)!important;",
+    "background-image:linear-gradient(180deg,rgba(255,255,255,var(--ocbg-glass-sheen,.07)),rgba(255,255,255,var(--ocbg-glass-sheen-mid,.02)) 38%,rgba(255,255,255,.01));",
+    "-webkit-backdrop-filter:blur(var(--ocbg-glass-blur,18px)) saturate(var(--oc-glass-saturation,1.24)) brightness(var(--ocbg-glass-brightness,1)) contrast(1.01);",
+    "backdrop-filter:blur(var(--ocbg-glass-blur,18px)) saturate(var(--oc-glass-saturation,1.24)) brightness(var(--ocbg-glass-brightness,1)) contrast(1.01);}",
     "html[data-ocbg-glass] .bg-secondary{background-color:color-mix(in srgb,var(--secondary) var(--ocbg-panel-opacity),transparent)!important;}",
     "html[data-ocbg-glass] .bg-muted{background-color:color-mix(in srgb,var(--muted) var(--ocbg-panel-opacity),transparent)!important;}",
-    "html[data-ocbg-glass] .oc-glass-composer,html[data-ocbg-glass] .oc-glass-floating{",
-    "background-color:color-mix(in srgb,var(--surface-elevated) var(--ocbg-panel-opacity),transparent)!important;}",
-    /* Limit expensive filters to actual panels, not every muted button/badge.
-       The left sidebar is excluded on purpose: it animates width when collapsed,
-       and a backdrop-filter on a width-animating element re-samples its backdrop
-       every frame, which stalls the collapse. OpenChamber already ships its own
-       glass for real panels; the sidebar keeps only the translucent fill above. */
-    "html[data-ocbg-glass] .oc-glass-floating,",
-    "html[data-ocbg-glass] .oc-glass-composer{",
-    "-webkit-backdrop-filter:blur(var(--ocbg-glass-blur,18px)) saturate(var(--oc-glass-saturation,1));",
-    "backdrop-filter:blur(var(--ocbg-glass-blur,18px)) saturate(var(--oc-glass-saturation,1));}",
+    /* Sidebar: translucent fill only, never a filter — it animates width when
+       collapsed and a filter on a width-animating element re-samples its
+       backdrop every frame, stalling the collapse. */
+    "html[data-ocbg-glass] .bg-sidebar{background-color:color-mix(in srgb,var(--sidebar) var(--ocbg-panel-opacity),transparent)!important;}",
+    /* Popovers, menus, dialogs and tooltips are reading surfaces: we never add
+       our translucency or filter to them, so `.bg-popover` keeps its official
+       opaque paint untouched. (The host's own `.oc-glass-*` popovers are the
+       host's design and stay as the host paints them.) */
     /* Playing video already updates every frame. Re-blurring it into panels, or
-       filtering the video layer itself, forces a full-frame repaint and stalls scroll. */
+       filtering the video layer itself, forces a full-frame repaint and stalls scroll.
+       Drop the backdrop filter on every glassed panel while playing (the fill
+       stays, so panels do not go fully transparent). */
     "html[data-ocbg-playing] .ocbg-layer{filter:none!important;transform:none!important;}",
     /* An integer opacity keeps the playing video eligible for a hardware overlay;
        the fade the user asked for is carried by the scrim instead. */
     "html[data-ocbg-playing] .ocbg-video{opacity:1!important;}",
     "html[data-ocbg-playing] .ocbg-layer{opacity:1!important;}",
     "html[data-ocbg-playing] .ocbg-scrim{opacity:var(--ocbg-scrim-playing,var(--ocbg-scrim,.28));}",
-    "html[data-ocbg-playing] aside.bg-sidebar,html[data-ocbg-playing] .oc-glass-floating,",
+    "html[data-ocbg-playing] .bg-card,html[data-ocbg-playing] .oc-glass-floating,",
     "html[data-ocbg-playing] .oc-glass-composer{",
     "-webkit-backdrop-filter:none!important;backdrop-filter:none!important;}",
     /* The sidebar never gets a filter from this plugin, playing or not. */
