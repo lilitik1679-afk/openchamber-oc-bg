@@ -3,6 +3,9 @@
  * 技术来自 DeepSeek Harness 插件 deepseek-harness-background（HaoyueQin，MIT）：
  *   壁纸层 z-index:-2 + 遮罩层 z-index:-1，属性开关，覆盖设计 token，backdrop-filter 毛玻璃。
  * 使用 OpenChamber 的主题 token，不覆盖应用管理的颜色变量。
+ *
+ * 视频是额外的合成层，不进 React 渲染。播放时关掉壁纸 filter 和面板 backdrop-filter，
+ * 否则浏览器会每帧把整页视频重新模糊进侧栏和输入框，聊天滚动会掉帧。
  */
 (function () {
   "use strict";
@@ -12,9 +15,17 @@
   var STORE_KEY = "ocbg.settings.v2";
   var PRESET = "https://haowallpaper.com/link/common/file/previewFileImg/16445310248537472";
   var LOCAL_PRESET = "/oc-bg-wallpaper.webp";
+  var IDB_NAME = "ocbg";
+  var IDB_STORE = "blobs";
+  var IDB_KEY = "wallpaper";
+  var IDB_REF = "idb:wallpaper";
+  var VIDEO_MAX_BYTES = 32 * 1024 * 1024;
+  var VIDEO_WARN_BYTES = 12 * 1024 * 1024;
+  var VIDEO_EXT = /\.(mp4|webm|ogv|ogg|m4v)$/i;
   var DEFAULTS = {
     enabled: true,
     image: PRESET,
+    kind: "auto",
     opacity: 0.9,
     scrim: 0.28,
     panel: 0.42,
@@ -25,6 +36,8 @@
   var settings = Object.assign({}, DEFAULTS);
   var imageState;
   var previewSync;
+  var runtimeSrc = null;
+  var gestureBound = false;
 
   function load() {
     try {
@@ -37,12 +50,80 @@
       settings[key] = Number.isFinite(value) ? Math.max(0, Math.min(max, value)) : DEFAULTS[key];
     });
     settings.fit = settings.fit === "contain" ? "contain" : "cover";
+    settings.kind = settings.kind === "image" || settings.kind === "video" ? settings.kind : "auto";
     settings.image = typeof settings.image === "string" ? settings.image : PRESET;
     if (!settings.image) settings.image = PRESET;
+    if (settings.image.indexOf("blob:") === 0 || settings.image.indexOf("data:video") === 0) {
+      settings.image = PRESET;
+      settings.kind = "auto";
+    }
   }
   function save() {
     try { localStorage.setItem(STORE_KEY, JSON.stringify(settings)); }
     catch (e) { toast("保存失败：本地存储已满"); }
+  }
+
+  function idbOpen() {
+    return new Promise(function (resolve, reject) {
+      if (!window.indexedDB) { reject(new Error("indexedDB unavailable")); return; }
+      var req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = function () {
+        if (!req.result.objectStoreNames.contains(IDB_STORE)) req.result.createObjectStore(IDB_STORE);
+      };
+      req.onsuccess = function () { resolve(req.result); };
+      req.onerror = function () { reject(req.error); };
+    });
+  }
+  function idbPut(blob) {
+    return idbOpen().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx = db.transaction(IDB_STORE, "readwrite");
+        tx.objectStore(IDB_STORE).put(blob, IDB_KEY);
+        tx.oncomplete = function () { db.close(); resolve(); };
+        tx.onerror = function () { db.close(); reject(tx.error); };
+      });
+    });
+  }
+  function idbGet() {
+    return idbOpen().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx = db.transaction(IDB_STORE, "readonly");
+        var req = tx.objectStore(IDB_STORE).get(IDB_KEY);
+        req.onsuccess = function () { db.close(); resolve(req.result || null); };
+        req.onerror = function () { db.close(); reject(req.error); };
+      });
+    });
+  }
+  function idbDelete() {
+    idbOpen().then(function (db) {
+      var tx = db.transaction(IDB_STORE, "readwrite");
+      tx.objectStore(IDB_STORE).delete(IDB_KEY);
+      tx.oncomplete = function () { db.close(); };
+      tx.onerror = function () { db.close(); };
+    }).catch(function () {});
+  }
+  function forgetLocalVideo() {
+    if (runtimeSrc) {
+      URL.revokeObjectURL(runtimeSrc);
+      runtimeSrc = null;
+    }
+    idbDelete();
+  }
+
+  function pathWithoutQuery(src) {
+    return String(src || "").split("?")[0].split("#")[0];
+  }
+  function looksLikeVideo(src) {
+    return VIDEO_EXT.test(pathWithoutQuery(src));
+  }
+  function resolvedKind() {
+    if (settings.kind === "video" || settings.kind === "image") return settings.kind;
+    if (settings.image === IDB_REF) return "video";
+    if (settings.image !== PRESET && looksLikeVideo(settings.image)) return "video";
+    return "image";
+  }
+  function motionReduced() {
+    return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   }
 
   var CSS = [
@@ -53,6 +134,7 @@
     "html[data-ocbg] .ocbg-layer{display:block;position:fixed;inset:0;z-index:-2;pointer-events:none;",
     "background-repeat:no-repeat;background-size:var(--ocbg-fit,cover);background-position:center;",
     "opacity:var(--ocbg-opacity,.9);filter:blur(var(--ocbg-wall-blur,0px));transform:scale(var(--ocbg-wall-scale,1));}",
+    "html[data-ocbg] .ocbg-video{position:absolute;inset:0;width:100%;height:100%;object-fit:var(--ocbg-fit,cover);object-position:center;pointer-events:none;}",
     "html[data-ocbg] .ocbg-scrim{display:block;position:fixed;inset:0;z-index:-1;pointer-events:none;",
     "background:var(--ocbg-scrim-color,#000);opacity:var(--ocbg-scrim,.28);}",
     "html[data-ocbg]:not(.dark) .ocbg-scrim{--ocbg-scrim-color:#fff;}",
@@ -72,6 +154,12 @@
     "html[data-ocbg-glass] .oc-glass-composer{",
     "-webkit-backdrop-filter:blur(var(--ocbg-glass-blur,18px)) saturate(var(--oc-glass-saturation,1));",
     "backdrop-filter:blur(var(--ocbg-glass-blur,18px)) saturate(var(--oc-glass-saturation,1));}",
+    /* Playing video already updates every frame. Re-blurring it into panels, or
+       filtering the video layer itself, forces a full-frame repaint and stalls scroll. */
+    "html[data-ocbg-playing] .ocbg-layer{filter:none!important;transform:none!important;}",
+    "html[data-ocbg-playing] aside.bg-sidebar,html[data-ocbg-playing] .oc-glass-floating,",
+    "html[data-ocbg-playing] .oc-glass-composer{",
+    "-webkit-backdrop-filter:none!important;backdrop-filter:none!important;}",
   ].join("");
 
   function injectCss() {
@@ -83,6 +171,8 @@
   }
 
   function imageSrc() {
+    if (resolvedKind() === "video" && runtimeSrc) return runtimeSrc;
+    if (settings.image === IDB_REF) return "";
     return settings.image === PRESET ? LOCAL_PRESET : settings.image;
   }
 
@@ -105,12 +195,124 @@
     image.src = src;
   }
 
+  function setPlaying(on) {
+    var html = document.documentElement;
+    var had = html.getAttribute("data-ocbg-playing") === "on";
+    if (on) html.setAttribute("data-ocbg-playing", "on");
+    else html.removeAttribute("data-ocbg-playing");
+    if (had !== on && previewSync) previewSync();
+  }
+
+  function stopVideoElement() {
+    var video = document.querySelector(".ocbg-video");
+    if (!video) return;
+    video.onerror = null;
+    video.onloadeddata = null;
+    video.pause();
+    video.removeAttribute("src");
+    try { video.load(); } catch (e) {}
+    video.remove();
+    document.documentElement.removeAttribute("data-ocbg-video");
+    setPlaying(false);
+  }
+
+  function syncPlayback() {
+    var video = document.querySelector(".ocbg-video");
+    if (!video || !settings.enabled) {
+      setPlaying(false);
+      return;
+    }
+    if (document.hidden || motionReduced()) {
+      if (!video.paused) video.pause();
+      setPlaying(false);
+      return;
+    }
+    if (!video.paused) {
+      setPlaying(true);
+      return;
+    }
+    var pending = video.play();
+    if (pending && pending.then) {
+      pending.then(function () { setPlaying(true); }).catch(function () {
+        setPlaying(false);
+        if (gestureBound) return;
+        gestureBound = true;
+        document.addEventListener("pointerdown", function onDown() {
+          document.removeEventListener("pointerdown", onDown, true);
+          gestureBound = false;
+          syncPlayback();
+        }, true);
+      });
+    }
+  }
+
+  function bindPlaybackGuards() {
+    document.addEventListener("visibilitychange", syncPlayback);
+    var mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    if (mq.addEventListener) mq.addEventListener("change", syncPlayback);
+    else if (mq.addListener) mq.addListener(syncPlayback);
+  }
+
+  function ensureVideo(layer, src) {
+    var video = layer.querySelector(".ocbg-video");
+    if (!video) {
+      video = document.createElement("video");
+      video.className = "ocbg-video";
+      video.muted = true;
+      video.defaultMuted = true;
+      video.loop = true;
+      video.playsInline = true;
+      video.controls = false;
+      video.preload = "metadata";
+      video.autoplay = false;
+      video.disablePictureInPicture = true;
+      video.referrerPolicy = "no-referrer";
+      video.setAttribute("muted", "");
+      video.setAttribute("playsinline", "");
+      video.setAttribute("aria-hidden", "true");
+      video.onerror = function () {
+        if (!video.dataset.src || (imageState && imageState.src !== video.dataset.src)) return;
+        imageState = { src: video.dataset.src, status: "error" };
+        setPlaying(false);
+        if (previewSync) previewSync();
+        toast("视频无法播放：请用 H.264 的 MP4 或 WebM，并确认链接可直接访问");
+      };
+      video.onloadeddata = function () {
+        if (imageState && imageState.src !== video.dataset.src) return;
+        imageState = { src: video.dataset.src, status: "loaded" };
+        if (previewSync) previewSync();
+        syncPlayback();
+      };
+      layer.appendChild(video);
+    }
+    if (video.dataset.src !== src) {
+      imageState = { src: src, status: "loading" };
+      video.dataset.src = src;
+      video.src = src;
+    }
+    return video;
+  }
+
   function apply() {
     var html = document.documentElement;
-    window.__OCBG_STATUS = Object.assign({}, settings, { image: imageSrc() });
+    var kind = resolvedKind();
+    var src = imageSrc();
+    window.__OCBG_STATUS = Object.assign({}, settings, {
+      image: src,
+      resolvedKind: kind,
+      playing: html.getAttribute("data-ocbg-playing") === "on",
+    });
     if (!settings.enabled || !settings.image) {
       html.removeAttribute("data-ocbg");
       html.removeAttribute("data-ocbg-glass");
+      html.removeAttribute("data-ocbg-video");
+      stopVideoElement();
+      return;
+    }
+    if (kind === "video" && !src) return;
+    if (kind === "image" && settings.image === IDB_REF) {
+      html.removeAttribute("data-ocbg-video");
+      stopVideoElement();
       return;
     }
     html.setAttribute("data-ocbg", "on");
@@ -131,13 +333,22 @@
       layer.className = "ocbg-layer";
       document.body.insertBefore(layer, document.body.firstChild);
     }
-    layer.style.backgroundImage = "url(" + JSON.stringify(imageSrc()) + ")";
+    if (kind === "video") {
+      html.setAttribute("data-ocbg-video", "on");
+      layer.style.backgroundImage = "none";
+      ensureVideo(layer, src);
+      syncPlayback();
+    } else {
+      html.removeAttribute("data-ocbg-video");
+      stopVideoElement();
+      layer.style.backgroundImage = "url(" + JSON.stringify(src) + ")";
+      validateImage();
+    }
     if (!document.querySelector(".ocbg-scrim")) {
       var scrim = document.createElement("div");
       scrim.className = "ocbg-scrim";
       document.body.insertBefore(scrim, layer.nextSibling);
     }
-    validateImage();
   }
 
   function toast(msg) {
@@ -228,35 +439,83 @@
         enabled.checked = value;
       }
 
+      var kind = document.createElement("select");
+      kind.setAttribute("aria-label", "背景类型");
+      kind.className = "h-9 rounded-lg bg-surface-elevated px-3 text-sm text-foreground ring-1 ring-inset ring-border/60 outline-none focus:ring-2 focus:ring-ring";
+      [["auto", "自动"], ["image", "图片"], ["video", "视频"]].forEach(function (entry) {
+        var option = document.createElement("option");
+        option.value = entry[0];
+        option.textContent = entry[1];
+        if (settings.kind === entry[0]) option.selected = true;
+        kind.appendChild(option);
+      });
+      kind.onchange = function () {
+        settings.kind = kind.value;
+        save(); apply(); syncPrev();
+      };
+      content.appendChild(row("类型", kind));
+
       var file = document.createElement("input");
       file.type = "file";
-      file.accept = "image/*";
-      file.setAttribute("aria-label", "上传本地壁纸");
+      file.accept = "image/*,video/mp4,video/webm,video/ogg";
+      file.setAttribute("aria-label", "上传本地图片或视频");
       file.className = "block w-full max-w-[28rem] text-sm text-foreground";
       file.onchange = function () {
         var f = file.files && file.files[0];
         if (!f) return;
+        var isVideo = f.type.indexOf("video/") === 0 || looksLikeVideo(f.name);
+        if (isVideo) {
+          if (f.size > VIDEO_MAX_BYTES) {
+            toast("视频超过 32MB，请改用可直接访问的链接");
+            file.value = "";
+            return;
+          }
+          if (f.size > VIDEO_WARN_BYTES) toast("视频较大，建议 1080p 短循环，避免占用显存");
+          idbPut(f).then(function () {
+            if (runtimeSrc) URL.revokeObjectURL(runtimeSrc);
+            runtimeSrc = URL.createObjectURL(f);
+            settings.kind = "video";
+            settings.image = IDB_REF;
+            kind.value = "video";
+            setEnabled(true);
+            save(); apply(); syncPrev();
+          }).catch(function () { toast("无法保存视频"); });
+          return;
+        }
         var reader = new FileReader();
         reader.onload = function () {
+          forgetLocalVideo();
+          settings.kind = "image";
           settings.image = reader.result;
+          kind.value = "image";
           setEnabled(true);
           save(); apply(); syncPrev();
         };
         reader.onerror = function () { toast("无法读取图片文件"); };
         reader.readAsDataURL(f);
       };
-      content.appendChild(row("本地壁纸", file));
+      content.appendChild(row("本地图片或视频", file));
 
       var url = document.createElement("input");
       url.type = "url";
-      url.value = settings.image && settings.image.indexOf("data:") !== 0 ? settings.image : PRESET;
-      url.placeholder = "https://example.com/wallpaper.jpg";
+      url.value = settings.image && settings.image.indexOf("data:") !== 0 && settings.image !== IDB_REF ? settings.image : "";
+      url.placeholder = "https://example.com/wallpaper.jpg 或 .mp4/.webm";
       url.setAttribute("aria-label", "壁纸链接");
       url.className = "h-9 w-full rounded-lg bg-surface-elevated px-3 text-sm text-foreground ring-1 ring-inset ring-border/60 outline-none focus:ring-2 focus:ring-ring";
       var urlRow = row("壁纸链接", url);
       var applyUrl = button("应用");
       applyUrl.onclick = function () {
-        settings.image = url.value.trim() || PRESET;
+        var next = url.value.trim();
+        if (!next) {
+          if (settings.image === IDB_REF) {
+            toast("本地视频仍在使用。要换链接请先填写地址");
+            return;
+          }
+          next = PRESET;
+        }
+        forgetLocalVideo();
+        settings.image = next;
+        settings.kind = kind.value;
         setEnabled(true);
         save(); apply(); syncPrev();
       };
@@ -280,8 +539,7 @@
         input.oninput = function () { settings[key] = parseFloat(input.value); show(); apply(); syncPrev(); };
         input.onchange = function () { save(); };
         wrap.appendChild(input); wrap.appendChild(value);
-        var result = row(label, wrap);
-        content.appendChild(result);
+        content.appendChild(row(label, wrap));
       }
       slider("opacity", "壁纸不透明度", 0, 1, 0.05, function (x) { return Math.round(x * 100) + "%"; });
       slider("scrim", "遮罩", 0, 0.95, 0.05, function (x) { return Math.round(x * 100) + "%"; });
@@ -308,8 +566,19 @@
       content.appendChild(actions);
 
       function syncPrev() {
-        preview.style.backgroundImage = settings.image ? "url(" + JSON.stringify(imageSrc()) + ")" : "none";
-        status.textContent = !settings.enabled ? "背景已关闭" : imageState?.status === "error" ? "图片加载失败" : imageState?.status === "loaded" ? "" : "正在加载图片";
+        var kindNow = resolvedKind();
+        var src = imageSrc();
+        preview.style.backgroundImage = kindNow === "video" || !src ? "none" : "url(" + JSON.stringify(src) + ")";
+        if (!settings.enabled) status.textContent = "背景已关闭";
+        else if (kindNow === "image" && settings.image === IDB_REF) status.textContent = "当前本地文件是视频，类型请选「视频」";
+        else if (imageState && imageState.status === "error") status.textContent = kindNow === "video" ? "视频加载失败" : "图片加载失败";
+        else if (kindNow === "video" && motionReduced()) status.textContent = "系统开启了减少动态效果，视频停在第一帧";
+        else if (kindNow === "video" && document.hidden) status.textContent = "页面在后台，视频已暂停";
+        else if (kindNow === "video" && document.documentElement.getAttribute("data-ocbg-playing") === "on") {
+          status.textContent = "视频播放中。壁纸模糊和毛玻璃采样已暂停，避免每帧重绘";
+        } else if (!src || !imageState || imageState.status === "loading") {
+          status.textContent = kindNow === "video" ? "正在加载视频" : "正在加载图片";
+        } else status.textContent = "";
       }
       previewSync = syncPrev;
       syncPrev();
@@ -330,7 +599,25 @@
   function boot() {
     load();
     injectCss();
+    bindPlaybackGuards();
     ui();
+    if (settings.image === IDB_REF) {
+      idbGet().then(function (blob) {
+        if (!blob) {
+          toast("本地视频已丢失，已恢复默认壁纸");
+          settings.image = PRESET;
+          settings.kind = "auto";
+          save();
+          apply();
+          if (previewSync) previewSync();
+          return;
+        }
+        runtimeSrc = URL.createObjectURL(blob);
+        apply();
+        if (previewSync) previewSync();
+      }).catch(function () { toast("无法读取本地视频"); });
+      return;
+    }
     apply();
   }
   if (document.body) boot();
