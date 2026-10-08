@@ -13,7 +13,7 @@
   window.__OCBG__ = true;
 
   var STORE_KEY = "ocbg.settings.v2";
-  var VERSION = "14";
+  var VERSION = "15";
   var PRESET = "https://haowallpaper.com/link/common/file/previewFileImg/16445310248537472";
   var LOCAL_PRESET = "/oc-bg-wallpaper.webp";
   var IDB_NAME = "ocbg";
@@ -315,21 +315,19 @@
        collapsed and a filter on a width-animating element re-samples its
        backdrop every frame, stalling the collapse. */
     "html[data-ocbg-glass] .bg-sidebar{background-color:color-mix(in srgb,var(--sidebar) var(--ocbg-panel-opacity),transparent)!important;}",
-    /* Dialogs / modal panels (all of them): frosted glass on the dialog card
-       itself. The dialog is a portal outside #root and paints an opaque
-       --surface-background, so the fill goes translucent here and the filter
-       sits on THIS element (a child filter would only sample the dialog's own
-       paint, not the wallpaper). Nested opaque `.bg-background` layout layers
-       inside the dialog (content column, scroll container) are made
-       transparent so the glass shows through; controls keep their own opaque
-       paints and stay legible. */
+    /* Dialogs / modal panels: the card itself turns translucent, so the nav
+       column (which paints --sidebar) and any transparent area let the
+       wallpaper through. The content column keeps its own opaque
+       `.bg-background`, so reading surfaces stay solid — the split you see is
+       intended: left side translucent, content side opaque. The filter sits on
+       THIS element (a child filter would only sample the dialog's own paint).
+       Only the settings view wrapper is cleared to transparent. */
     "html[data-ocbg-glass] [role=dialog]{",
     "background-color:color-mix(in srgb,var(--surface-background) var(--ocbg-panel-opacity),transparent)!important;",
     "background-image:linear-gradient(180deg,rgba(255,255,255,var(--ocbg-glass-sheen,.07)),rgba(255,255,255,var(--ocbg-glass-sheen-mid,.02)) 38%,rgba(255,255,255,.01));",
     "-webkit-backdrop-filter:blur(var(--ocbg-glass-blur,18px)) saturate(var(--oc-glass-saturation,1.24)) brightness(var(--ocbg-glass-brightness,1)) contrast(1.01);",
     "backdrop-filter:blur(var(--ocbg-glass-blur,18px)) saturate(var(--oc-glass-saturation,1.24)) brightness(var(--ocbg-glass-brightness,1)) contrast(1.01);}",
-    "html[data-ocbg-glass] [role=dialog] [data-settings-view],",
-    "html[data-ocbg-glass] [role=dialog] .bg-background{background-color:transparent!important;}",
+    "html[data-ocbg-glass] [role=dialog] [data-settings-view]{background-color:transparent!important;}",
     /* Popovers, menus, dialogs and tooltips are reading surfaces: we never add
        our translucency or filter to them, so `.bg-popover` keeps its official
        opaque paint untouched. (The host's own `.oc-glass-*` popovers are the
