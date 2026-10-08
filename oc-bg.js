@@ -13,7 +13,7 @@
   window.__OCBG__ = true;
 
   var STORE_KEY = "ocbg.settings.v2";
-  var VERSION = "12";
+  var VERSION = "13";
   var PRESET = "https://haowallpaper.com/link/common/file/previewFileImg/16445310248537472";
   var LOCAL_PRESET = "/oc-bg-wallpaper.webp";
   var IDB_NAME = "ocbg";
@@ -315,6 +315,19 @@
        collapsed and a filter on a width-animating element re-samples its
        backdrop every frame, stalling the collapse. */
     "html[data-ocbg-glass] .bg-sidebar{background-color:color-mix(in srgb,var(--sidebar) var(--ocbg-panel-opacity),transparent)!important;}",
+    /* Settings panel (option 1): frosted glass on the outer dialog only.
+       The dialog is a portal outside #root and paints an opaque
+       --surface-background, so the fill goes translucent here and the filter
+       sits on THIS element (a child filter would only sample the dialog's own
+       paint, not the wallpaper). The inner [data-settings-view] is made
+       transparent so the glass shows through; inner controls keep their own
+       opaque paints and stay legible. */
+    "html[data-ocbg-glass] [role=dialog]:has([data-settings-view]){",
+    "background-color:color-mix(in srgb,var(--surface-background) var(--ocbg-panel-opacity),transparent)!important;",
+    "background-image:linear-gradient(180deg,rgba(255,255,255,var(--ocbg-glass-sheen,.07)),rgba(255,255,255,var(--ocbg-glass-sheen-mid,.02)) 38%,rgba(255,255,255,.01));",
+    "-webkit-backdrop-filter:blur(var(--ocbg-glass-blur,18px)) saturate(var(--oc-glass-saturation,1.24)) brightness(var(--ocbg-glass-brightness,1)) contrast(1.01);",
+    "backdrop-filter:blur(var(--ocbg-glass-blur,18px)) saturate(var(--oc-glass-saturation,1.24)) brightness(var(--ocbg-glass-brightness,1)) contrast(1.01);}",
+    "html[data-ocbg-glass] [data-settings-view]{background-color:transparent!important;}",
     /* Popovers, menus, dialogs and tooltips are reading surfaces: we never add
        our translucency or filter to them, so `.bg-popover` keeps its official
        opaque paint untouched. (The host's own `.oc-glass-*` popovers are the
@@ -330,7 +343,8 @@
     "html[data-ocbg-playing] .ocbg-layer{opacity:1!important;}",
     "html[data-ocbg-playing] .ocbg-scrim{opacity:var(--ocbg-scrim-playing,var(--ocbg-scrim,.28));}",
     "html[data-ocbg-playing] .bg-card,html[data-ocbg-playing] .oc-glass-floating,",
-    "html[data-ocbg-playing] .oc-glass-composer{",
+    "html[data-ocbg-playing] .oc-glass-composer,",
+    "html[data-ocbg-playing] [role=dialog]:has([data-settings-view]){",
     "-webkit-backdrop-filter:none!important;backdrop-filter:none!important;}",
     /* The sidebar never gets a filter from this plugin, playing or not. */
     "html[data-ocbg] aside.bg-sidebar{-webkit-backdrop-filter:none!important;backdrop-filter:none!important;}",
