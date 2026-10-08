@@ -80,11 +80,11 @@ oc-bg/
 
 面向 OpenChamber Web（`@openchamber/web`）。依赖的设置锚点 `appearance.session-activity` 与 token 名称属于宿主实现，宿主改版后可能需要同步调整。
 
-## 致谢
+## 致谢 / 第三方资源
 
 - 技术思路参考 [HaoyueQin/deepseek-harness-background](https://github.com/HaoyueQin/deepseek-harness-background)（MIT License）。
 - 字体：Noto Sans SC，SIL Open Font License 1.1，见 `fonts/noto-sans-sc/LICENSE`。
-- 内置默认壁纸仅作演示用途，版权归原始来源所有。
+- 内置默认壁纸 `wallpaper.webp` 仅作演示用途，版权归原始来源所有。
 
 ## License
 
