@@ -28,7 +28,7 @@
 - **壁纸层 + 遮罩层**：壁纸固定在 `z-index:-2`，遮罩在 `z-index:-1`；遮罩自动跟随明暗主题（浅色用白纱，深色用黑纱）。
 - **毛玻璃面板**：对卡片、弹层、输入区等面板做半透明 + `backdrop-filter` 模糊。**侧边栏除外**：它在收起时动画 `width`，对宽度动画中的元素加 `backdrop-filter` 会让浏览器每帧重新采样背景，造成收起卡顿；OpenChamber 本身也有 glass 系统，侧边栏只保留半透明填充。
 - **实时调节**：壁纸不透明度、遮罩强度、面板不透明度、毛玻璃模糊、壁纸模糊、填充方式（铺满 / 完整显示）。
-- **设置持久化**：写入浏览器 `localStorage`（键 `ocbg.settings.v2`）；本地视频另存 IndexedDB。
+- **设置持久化**：写入浏览器 `localStorage`（键 `ocbg.settings.v2`），只存短引用；本地图片和视频存在 IndexedDB。旧版把本地图片存成 Data URL 放在 `localStorage`，会撑爆约 5MB 的配额导致保存失败，新版启动时会自动把它迁移到 IndexedDB。
 - **中文字形兜底**：自托管 Noto Sans SC 变量字体，给没有 CJK 字体的设备补字形。
 - **不覆盖主题**：只读取宿主的设计 token（`--surface-background`、`--card`、`--popover` 等），颜色仍由 OpenChamber 自己管理。
 
@@ -105,7 +105,7 @@ npm root -g        # 全局 node_modules 路径，再拼 /@openchamber/web/dist
 | --- | --- |
 | 启用背景 | 总开关 |
 | 类型 | 自动 / 图片 / 视频。自动按后缀判断，无后缀时读响应类型 |
-| 本地图片或视频 | 文件选择器可选所有图片和视频（含 `.mp4` `.webm` `.mov` `.mkv` 等）；能否播放取决于浏览器编码支持，推荐 H.264 MP4 / WebM。图片转 Data URL，视频存 IndexedDB，超过 32MB 会拒绝 |
+| 本地图片或视频 | 文件选择器可选所有图片和视频（含 `.mp4` `.webm` `.mov` `.mkv` 等）；能否播放取决于浏览器编码支持，推荐 H.264 MP4 / WebM。图片和视频都存 IndexedDB（`localStorage` 只留一个短引用），超过 32MB 会拒绝 |
 | 壁纸链接 | 粘贴可直接访问的图片或视频 URL |
 | 壁纸不透明度 | `0–100%`，壁纸整体透明度 |
 | 遮罩 | `0–95%`，壁纸之上的可读性遮罩 |

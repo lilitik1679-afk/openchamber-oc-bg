@@ -13,14 +13,16 @@
   window.__OCBG__ = true;
 
   var STORE_KEY = "ocbg.settings.v2";
-  var VERSION = "10";
+  var VERSION = "11";
   var PRESET = "https://haowallpaper.com/link/common/file/previewFileImg/16445310248537472";
   var LOCAL_PRESET = "/oc-bg-wallpaper.webp";
   var IDB_NAME = "ocbg";
   var IDB_STORE = "blobs";
   var IDB_KEY = "wallpaper";
   var POSTER_KEY = "poster";
+  var IMAGE_KEY = "image";
   var IDB_REF = "idb:wallpaper";
+  var IDB_IMAGE_REF = "idb:image";
   var VIDEO_MAX_BYTES = 32 * 1024 * 1024;
   var VIDEO_WARN_BYTES = 12 * 1024 * 1024;
   var VIDEO_EXT = /\.(mp4|webm|ogv|ogg|m4v|mov|mkv|avi)$/i;
@@ -41,6 +43,8 @@
   var imageState;
   var previewSync;
   var runtimeSrc = null;
+  var imageObjectUrl = null;
+  var migrateImageData = null;
   var gestureBound = false;
   var mediaProbe = null;
   var pendingPlay = null;
@@ -66,10 +70,21 @@
       settings.image = PRESET;
       settings.kind = "auto";
     }
+    // Legacy: an uploaded image used to be a data URL inside localStorage,
+    // which blows the ~5MB quota and breaks every later save. Move it to
+    // IndexedDB on the next boot and keep only a small reference here.
+    if (settings.image.indexOf("data:image/") === 0) {
+      migrateImageData = settings.image;
+      settings.image = IDB_IMAGE_REF;
+    }
   }
   function save() {
     try { localStorage.setItem(STORE_KEY, JSON.stringify(settings)); }
-    catch (e) { toast("保存失败：本地存储已满"); }
+    catch (e) {
+      // Local images live in IndexedDB, so this should no longer be quota.
+      console.warn("[oc-bg] 保存失败", { name: e.name, bytes: JSON.stringify(settings).length });
+      toast(e.name === "QuotaExceededError" ? "保存失败：浏览器本地存储已满" : "保存失败：" + (e.name || "未知错误"));
+    }
   }
 
   function idbOpen() {
@@ -133,6 +148,13 @@
     idbDeleteKey(POSTER_KEY);
     releasePoster();
   }
+  function forgetLocalImage() {
+    if (imageObjectUrl) {
+      URL.revokeObjectURL(imageObjectUrl);
+      imageObjectUrl = null;
+    }
+    idbDeleteKey(IMAGE_KEY);
+  }
   function releasePoster() {
     if (poster && poster.url) URL.revokeObjectURL(poster.url);
     poster = null;
@@ -188,6 +210,7 @@
   }
   function hintedKind(src) {
     if (src === IDB_REF || looksLikeVideo(src)) return "video";
+    if (src === IDB_IMAGE_REF) return "image";
     if (src === PRESET || src.indexOf("data:image/") === 0 || IMAGE_EXT.test(pathWithoutQuery(src))) return "image";
     return null;
   }
@@ -307,6 +330,7 @@
 
   function imageSrc() {
     if (settings.image === IDB_REF && resolvedKind() === "video" && runtimeSrc) return runtimeSrc;
+    if (settings.image === IDB_IMAGE_REF) return imageObjectUrl || "";
     if (remoteVideo && remoteVideo.src === settings.image && remoteVideo.url && resolvedKind() === "video") return remoteVideo.url;
     if (settings.image === IDB_REF) return "";
     return settings.image === PRESET ? LOCAL_PRESET : settings.image;
@@ -796,12 +820,32 @@
         }
         var reader = new FileReader();
         reader.onload = function () {
-          forgetLocalVideo();
-          settings.kind = "auto";
-          settings.image = reader.result;
-          kind.value = "auto";
-          setEnabled(true);
-          save(); apply(); syncPrev();
+          var dataUrl = reader.result;
+          var done = function () {
+            settings.kind = "auto";
+            settings.image = IDB_IMAGE_REF;
+            kind.value = "auto";
+            setEnabled(true);
+            save(); apply(); syncPrev();
+          };
+          var blob = f;
+          idbPutKey(IMAGE_KEY, blob).then(function () {
+            if (imageObjectUrl) URL.revokeObjectURL(imageObjectUrl);
+            imageObjectUrl = URL.createObjectURL(blob);
+            forgetLocalVideo();
+            done();
+          }).catch(function (error) {
+            // IndexedDB unavailable: fall back to the data URL, and warn that
+            // a very large image may not persist.
+            console.warn("[oc-bg] 无法将图片存入 IndexedDB，退回本地存储", { reason: error.name });
+            if (dataUrl && dataUrl.length > 2 * 1024 * 1024) toast("图片较大，浏览器可能无法长期保存，建议压缩后再上传");
+            forgetLocalVideo();
+            settings.kind = "auto";
+            settings.image = dataUrl;
+            kind.value = "auto";
+            setEnabled(true);
+            save(); apply(); syncPrev();
+          });
         };
         reader.onerror = function () { toast("无法读取图片文件"); };
         reader.readAsDataURL(f);
@@ -826,6 +870,7 @@
           next = PRESET;
         }
         forgetLocalVideo();
+        forgetLocalImage();
         stopVideoElement();
         releaseRemoteVideo();
         cancelMediaProbe();
@@ -933,6 +978,42 @@
     injectCss();
     bindPlaybackGuards();
     ui();
+    if (migrateImageData) {
+      // Convert the oversized legacy data URL into an IndexedDB blob, then
+      // persist the small reference so saves stop hitting the quota.
+      var data = migrateImageData;
+      migrateImageData = null;
+      fetch(data).then(function (r) { return r.blob(); }).then(function (blob) {
+        return idbPutKey(IMAGE_KEY, blob).then(function () {
+          if (imageObjectUrl) URL.revokeObjectURL(imageObjectUrl);
+          imageObjectUrl = URL.createObjectURL(blob);
+        });
+      }).then(function () {
+        save(); apply();
+        if (previewSync) previewSync();
+      }).catch(function () {
+        // Could not store it: keep the current reference and just try to save.
+        save(); apply();
+        if (previewSync) previewSync();
+      });
+      return;
+    }
+    if (settings.image === IDB_IMAGE_REF) {
+      idbGet(IMAGE_KEY).then(function (blob) {
+        if (!blob) {
+          toast("本地图片已丢失，已恢复默认壁纸");
+          settings.image = PRESET;
+          settings.kind = "auto";
+          save(); apply();
+          if (previewSync) previewSync();
+          return;
+        }
+        imageObjectUrl = URL.createObjectURL(blob);
+        apply();
+        if (previewSync) previewSync();
+      }).catch(function () { toast("无法读取本地图片"); });
+      return;
+    }
     if (settings.image === IDB_REF) {
       idbGet(POSTER_KEY).then(function (blob) {
         if (blob) poster = { url: URL.createObjectURL(blob) };
