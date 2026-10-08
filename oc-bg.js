@@ -13,6 +13,7 @@
   window.__OCBG__ = true;
 
   var STORE_KEY = "ocbg.settings.v2";
+  var VERSION = "8";
   var PRESET = "https://haowallpaper.com/link/common/file/previewFileImg/16445310248537472";
   var LOCAL_PRESET = "/oc-bg-wallpaper.webp";
   var IDB_NAME = "ocbg";
@@ -21,7 +22,8 @@
   var IDB_REF = "idb:wallpaper";
   var VIDEO_MAX_BYTES = 32 * 1024 * 1024;
   var VIDEO_WARN_BYTES = 12 * 1024 * 1024;
-  var VIDEO_EXT = /\.(mp4|webm|ogv|ogg|m4v)$/i;
+  var VIDEO_EXT = /\.(mp4|webm|ogv|ogg|m4v|mov|mkv|avi)$/i;
+  var IMAGE_EXT = /\.(png|jpe?g|webp|gif|bmp|svg|avif|apng|ico)$/i;
   var DEFAULTS = {
     enabled: true,
     image: PRESET,
@@ -38,6 +40,9 @@
   var previewSync;
   var runtimeSrc = null;
   var gestureBound = false;
+  var mediaProbe = null;
+  var pendingPlay = null;
+  var remoteVideo = null;
 
   function load() {
     try {
@@ -116,11 +121,64 @@
   function looksLikeVideo(src) {
     return VIDEO_EXT.test(pathWithoutQuery(src));
   }
+  function hintedKind(src) {
+    if (src === IDB_REF || looksLikeVideo(src)) return "video";
+    if (src === PRESET || src.indexOf("data:image/") === 0 || IMAGE_EXT.test(pathWithoutQuery(src))) return "image";
+    return null;
+  }
   function resolvedKind() {
     if (settings.kind === "video" || settings.kind === "image") return settings.kind;
-    if (settings.image === IDB_REF) return "video";
-    if (settings.image !== PRESET && looksLikeVideo(settings.image)) return "video";
-    return "image";
+    return hintedKind(settings.image) || (mediaProbe && mediaProbe.src === settings.image && mediaProbe.kind) || "image";
+  }
+  function cancelMediaProbe() {
+    if (mediaProbe && mediaProbe.status === "loading") mediaProbe.controller.abort();
+    if (mediaProbe) clearTimeout(mediaProbe.timer);
+    mediaProbe = null;
+  }
+  function prepareMedia() {
+    if (mediaProbe && mediaProbe.src !== settings.image) cancelMediaProbe();
+    if (settings.kind !== "auto" || hintedKind(settings.image)) return true;
+    if (mediaProbe) return mediaProbe.status !== "loading";
+    var probeUrl;
+    try { probeUrl = new URL(settings.image, window.location.href); }
+    catch (e) { return true; }
+    if (probeUrl.protocol !== "http:" && probeUrl.protocol !== "https:") return true;
+
+    // Extensionless media URLs are common. Read only headers, once per source,
+    // rather than downloading a video into JS or probing on every slider drag.
+    var probe = mediaProbe = {
+      src: settings.image, status: "loading", kind: null, contentType: "",
+      controller: new AbortController(),
+    };
+    imageState = { src: imageSrc(), status: "loading" };
+    probe.timer = setTimeout(function () { probe.controller.abort(); }, 5000);
+    fetch(probeUrl.href, {
+      method: "HEAD", signal: probe.controller.signal,
+      credentials: "omit", referrerPolicy: "no-referrer",
+    }).then(function (response) {
+      if (mediaProbe !== probe) return;
+      probe.contentType = (response.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+      probe.status = "ready";
+      if (response.ok && probe.contentType.indexOf("video/") === 0) probe.kind = "video";
+      else if (response.ok && probe.contentType.indexOf("image/") === 0) probe.kind = "image";
+      else if (response.ok && (probe.contentType === "text/html" || probe.contentType === "application/json")) {
+        probe.status = "error";
+        imageState = { src: imageSrc(), status: "error", error: "链接返回的是网页或接口数据，请使用图片或视频直链" };
+        console.warn("[oc-bg] 链接不是媒体直链", { contentType: probe.contentType });
+      }
+      // A rejected HEAD does not imply a rejected media GET (signed URLs may
+      // allow only GET). The image/video elements remain the final validator.
+    }).catch(function (error) {
+      if (mediaProbe !== probe) return;
+      probe.status = "ready";
+      console.info("[oc-bg] 无法读取媒体类型，改由浏览器检测", { reason: error.name });
+    }).then(function () {
+      clearTimeout(probe.timer);
+      if (mediaProbe !== probe || settings.kind !== "auto" || !settings.enabled) return;
+      apply();
+      if (previewSync) previewSync();
+    });
+    return false;
   }
   function motionReduced() {
     return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -171,26 +229,51 @@
   }
 
   function imageSrc() {
-    if (resolvedKind() === "video" && runtimeSrc) return runtimeSrc;
+    if (settings.image === IDB_REF && resolvedKind() === "video" && runtimeSrc) return runtimeSrc;
+    if (remoteVideo && remoteVideo.src === settings.image && remoteVideo.url && resolvedKind() === "video") return remoteVideo.url;
     if (settings.image === IDB_REF) return "";
     return settings.image === PRESET ? LOCAL_PRESET : settings.image;
   }
 
+  function publishStatus() {
+    window.__OCBG_STATUS = Object.assign({}, settings, {
+      version: VERSION, image: imageSrc(), resolvedKind: resolvedKind(),
+      playing: document.documentElement.hasAttribute("data-ocbg-playing"),
+      mediaStatus: imageState ? imageState.status : "idle",
+      error: imageState && imageState.error || null,
+      errorCode: imageState && imageState.errorCode || null,
+      contentType: mediaProbe && mediaProbe.src === settings.image ? mediaProbe.contentType : "",
+      transport: remoteVideo && remoteVideo.url ? "local-blob" : "direct",
+    });
+  }
+
   function validateImage() {
     var src = imageSrc();
-    if (imageState && imageState.src === src) return;
+    if (imageState && imageState.src === src && imageState.kind === "image") return;
     var image = new Image();
-    imageState = { src: src, status: "loading" };
+    imageState = { src: src, kind: "image", status: "loading" };
     image.onload = function () {
-      if (imageState.src !== src) return;
+      if (imageState.src !== src || imageSrc() !== src || resolvedKind() !== "image") return;
       imageState.status = "loaded";
+      publishStatus();
       if (previewSync) previewSync();
     };
     image.onerror = function () {
-      if (imageState.src !== src) return;
+      if (imageState.src !== src || imageSrc() !== src || resolvedKind() !== "image") return;
+      // Some hosts forbid CORS/HEAD while still serving playable media. Try
+      // the video decoder once for an unclassified source, without a proxy.
+      if (settings.kind === "auto" && mediaProbe && mediaProbe.src === settings.image && !mediaProbe.kind) {
+        mediaProbe.kind = "video";
+        apply();
+        if (previewSync) previewSync();
+        return;
+      }
       imageState.status = "error";
+      imageState.error = "图片加载失败：请上传本地图或使用可直接访问的图片链接";
+      publishStatus();
       if (previewSync) previewSync();
-      toast("图片加载失败：请上传本地图或使用可直接访问的图片链接");
+      console.warn("[oc-bg] 图片加载失败", { kind: settings.kind });
+      if (settings.enabled) toast(imageState.error);
     };
     image.src = src;
   }
@@ -200,11 +283,15 @@
     var had = html.getAttribute("data-ocbg-playing") === "on";
     if (on) html.setAttribute("data-ocbg-playing", "on");
     else html.removeAttribute("data-ocbg-playing");
+    publishStatus();
     if (had !== on && previewSync) previewSync();
   }
 
   function stopVideoElement() {
     var video = document.querySelector(".ocbg-video");
+    pendingPlay = null;
+    document.documentElement.removeAttribute("data-ocbg-video");
+    setPlaying(false);
     if (!video) return;
     video.onerror = null;
     video.onloadeddata = null;
@@ -212,8 +299,110 @@
     video.removeAttribute("src");
     try { video.load(); } catch (e) {}
     video.remove();
-    document.documentElement.removeAttribute("data-ocbg-video");
+  }
+
+  function reportVideoError(video) {
+    var code = video.error ? video.error.code : 0;
+    if ((code === 0 || code === 2 || code === 4) && retryRemoteVideo()) return;
+    var messages = {
+      1: "视频加载已中止，请重新应用链接",
+      2: "视频网络请求失败，请检查链接是否有效或已过期",
+      3: "视频解码失败，请转换成 H.264 的 MP4 或 WebM",
+      4: "浏览器无法读取这个视频，请确认是视频直链，或转换成 H.264 的 MP4 / WebM",
+    };
+    imageState = { src: video.dataset.src, status: "error", errorCode: code, error: messages[code] || "视频无法播放，请检查链接和编码" };
     setPlaying(false);
+    if (previewSync) previewSync();
+    console.warn("[oc-bg] 视频无法播放", { code: code, networkState: video.networkState, readyState: video.readyState });
+    toast(imageState.error);
+  }
+
+  function releaseRemoteVideo() {
+    if (!remoteVideo) return;
+    remoteVideo.controller.abort();
+    clearTimeout(remoteVideo.timer);
+    if (remoteVideo.url) URL.revokeObjectURL(remoteVideo.url);
+    remoteVideo = null;
+  }
+
+  async function readVideoBlob(response, signal) {
+    if (!response.ok) {
+      if (response.body) await response.body.cancel();
+      throw new Error("视频请求失败（HTTP " + response.status + "），请检查链接是否有访问限制");
+    }
+    var contentType = (response.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+    if (contentType === "text/html" || contentType === "application/json") {
+      if (response.body) await response.body.cancel();
+      throw new Error("链接返回的不是视频，请使用视频文件直链");
+    }
+    var size = Number(response.headers.get("content-length"));
+    if (size > VIDEO_MAX_BYTES) {
+      if (response.body) await response.body.cancel();
+      throw new Error("视频超过 32MB 的兼容加载上限，请换小视频或可直接播放的链接");
+    }
+    if (!response.body) throw new Error("视频服务器没有返回文件内容");
+    var reader = response.body.getReader();
+    var chunks = [];
+    var total = 0;
+    try {
+      while (true) {
+        var part = await reader.read();
+        if (signal.aborted) throw new DOMException("加载已取消", "AbortError");
+        if (part.done) break;
+        total += part.value.byteLength;
+        if (total > VIDEO_MAX_BYTES) {
+          await reader.cancel();
+          throw new Error("视频超过 32MB 的兼容加载上限，请换小视频或可直接播放的链接");
+        }
+        chunks.push(part.value);
+      }
+    } finally { reader.releaseLock(); }
+    if (!total) throw new Error("视频文件为空");
+    return new Blob(chunks, { type: contentType || "application/octet-stream" });
+  }
+
+  function retryRemoteVideo() {
+    if (remoteVideo) return remoteVideo.status === "loading";
+    var url;
+    try { url = new URL(settings.image, window.location.href); }
+    catch (e) { return false; }
+    if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+    if (url.origin === window.location.origin) return false;
+
+    // HTMLVideoElement has no referrerPolicy. Retry rejected cross-origin
+    // media with a bounded, CORS-checked fetch instead of changing the host's
+    // referrer policy or adding a server proxy. Normal streams stay direct.
+    var attempt = remoteVideo = {
+      src: settings.image, url: null, status: "loading", controller: new AbortController(),
+    };
+    attempt.timer = setTimeout(function () { attempt.controller.abort(); }, 30000);
+    imageState = { src: imageSrc(), status: "loading" };
+    setPlaying(false);
+    if (previewSync) previewSync();
+    console.info("[oc-bg] 视频直连失败，尝试受限的无来源请求");
+    fetch(url.href, {
+      signal: attempt.controller.signal, credentials: "omit", referrerPolicy: "no-referrer",
+    }).then(function (response) { return readVideoBlob(response, attempt.controller.signal); })
+      .then(function (blob) {
+        if (remoteVideo !== attempt || !settings.enabled || settings.image !== attempt.src || resolvedKind() !== "video") return;
+        attempt.status = "ready";
+        attempt.url = URL.createObjectURL(blob);
+        apply();
+        if (previewSync) previewSync();
+      }).catch(function (error) {
+        if (remoteVideo !== attempt || !settings.enabled || settings.image !== attempt.src || resolvedKind() !== "video") return;
+        attempt.status = "error";
+        imageState = {
+          src: imageSrc(), status: "error",
+          error: error.name === "AbortError" ? "视频加载超时，请检查网络后重新应用" :
+            error.name === "TypeError" ? "视频服务器不允许跨站读取，请下载后选择本地文件，或换其他直链" : error.message,
+        };
+        setPlaying(false);
+        if (previewSync) previewSync();
+        console.warn("[oc-bg] 视频兼容加载失败", { reason: error.name });
+        toast(imageState.error);
+      }).then(function () { clearTimeout(attempt.timer); });
+    return true;
   }
 
   function syncPlayback() {
@@ -222,6 +411,7 @@
       setPlaying(false);
       return;
     }
+    if (imageState && imageState.src === video.dataset.src && imageState.status === "error") return;
     if (document.hidden || motionReduced()) {
       if (!video.paused) video.pause();
       setPlaying(false);
@@ -231,10 +421,27 @@
       setPlaying(true);
       return;
     }
+    if (pendingPlay && pendingPlay.video === video && pendingPlay.src === video.dataset.src) return;
+    var request = pendingPlay = { video: video, src: video.dataset.src };
     var pending = video.play();
     if (pending && pending.then) {
-      pending.then(function () { setPlaying(true); }).catch(function () {
+      pending.then(function () {
+        if (pendingPlay === request) pendingPlay = null;
+        if (!video.isConnected || imageSrc() !== request.src || resolvedKind() !== "video" || !settings.enabled) return;
+        if (document.hidden || motionReduced()) { video.pause(); setPlaying(false); return; }
+        setPlaying(true);
+      }).catch(function (error) {
+        if (pendingPlay === request) pendingPlay = null;
+        if (!video.isConnected || imageSrc() !== request.src || resolvedKind() !== "video") return;
         setPlaying(false);
+        if (error.name === "AbortError") return;
+        if (error.name !== "NotAllowedError") {
+          if (!imageState || imageState.status !== "error") reportVideoError(video);
+          return;
+        }
+        imageState = { src: request.src, status: "blocked" };
+        publishStatus();
+        if (previewSync) previewSync();
         if (gestureBound) return;
         gestureBound = true;
         document.addEventListener("pointerdown", function onDown() {
@@ -243,7 +450,7 @@
           syncPlayback();
         }, true);
       });
-    }
+    } else pendingPlay = null;
   }
 
   function bindPlaybackGuards() {
@@ -266,20 +473,18 @@
       video.preload = "metadata";
       video.autoplay = false;
       video.disablePictureInPicture = true;
-      video.referrerPolicy = "no-referrer";
       video.setAttribute("muted", "");
       video.setAttribute("playsinline", "");
       video.setAttribute("aria-hidden", "true");
       video.onerror = function () {
         if (!video.dataset.src || (imageState && imageState.src !== video.dataset.src)) return;
-        imageState = { src: video.dataset.src, status: "error" };
-        setPlaying(false);
-        if (previewSync) previewSync();
-        toast("视频无法播放：请用 H.264 的 MP4 或 WebM，并确认链接可直接访问");
+        if (imageState && imageState.status === "error") return;
+        reportVideoError(video);
       };
       video.onloadeddata = function () {
         if (imageState && imageState.src !== video.dataset.src) return;
         imageState = { src: video.dataset.src, status: "loaded" };
+        publishStatus();
         if (previewSync) previewSync();
         syncPlayback();
       };
@@ -296,17 +501,28 @@
   function apply() {
     var html = document.documentElement;
     var kind = resolvedKind();
+    if (remoteVideo && (remoteVideo.src !== settings.image || kind !== "video" || !settings.enabled)) releaseRemoteVideo();
     var src = imageSrc();
-    window.__OCBG_STATUS = Object.assign({}, settings, {
-      image: src,
-      resolvedKind: kind,
-      playing: html.getAttribute("data-ocbg-playing") === "on",
-    });
+    publishStatus();
     if (!settings.enabled || !settings.image) {
       html.removeAttribute("data-ocbg");
       html.removeAttribute("data-ocbg-glass");
       html.removeAttribute("data-ocbg-video");
+      if (mediaProbe && mediaProbe.status === "loading") cancelMediaProbe();
       stopVideoElement();
+      return;
+    }
+    if (!prepareMedia() || (settings.kind === "auto" && mediaProbe && mediaProbe.status === "error")) {
+      html.removeAttribute("data-ocbg");
+      html.removeAttribute("data-ocbg-glass");
+      stopVideoElement();
+      publishStatus();
+      return;
+    }
+    kind = resolvedKind();
+    src = imageSrc();
+    if (remoteVideo && remoteVideo.src === settings.image && remoteVideo.status !== "ready") {
+      publishStatus();
       return;
     }
     if (kind === "video" && !src) return;
@@ -457,7 +673,7 @@
 
       var file = document.createElement("input");
       file.type = "file";
-      file.accept = "image/*,video/mp4,video/webm,video/ogg";
+      file.accept = "image/*,video/*,.mp4,.webm,.ogv,.ogg,.m4v,.mov,.mkv,.avi";
       file.setAttribute("aria-label", "上传本地图片或视频");
       file.className = "block w-full max-w-[28rem] text-sm text-foreground";
       file.onchange = function () {
@@ -474,20 +690,23 @@
           idbPut(f).then(function () {
             if (runtimeSrc) URL.revokeObjectURL(runtimeSrc);
             runtimeSrc = URL.createObjectURL(f);
-            settings.kind = "video";
+            settings.kind = "auto";
             settings.image = IDB_REF;
-            kind.value = "video";
+            kind.value = "auto";
             setEnabled(true);
             save(); apply(); syncPrev();
-          }).catch(function () { toast("无法保存视频"); });
+          }).catch(function (error) {
+            console.warn("[oc-bg] 无法保存视频", { reason: error.name });
+            toast("无法保存视频：请检查浏览器存储权限和可用空间");
+          });
           return;
         }
         var reader = new FileReader();
         reader.onload = function () {
           forgetLocalVideo();
-          settings.kind = "image";
+          settings.kind = "auto";
           settings.image = reader.result;
-          kind.value = "image";
+          kind.value = "auto";
           setEnabled(true);
           save(); apply(); syncPrev();
         };
@@ -514,6 +733,9 @@
           next = PRESET;
         }
         forgetLocalVideo();
+        stopVideoElement();
+        releaseRemoteVideo();
+        cancelMediaProbe();
         settings.image = next;
         settings.kind = kind.value;
         setEnabled(true);
@@ -568,10 +790,15 @@
       function syncPrev() {
         var kindNow = resolvedKind();
         var src = imageSrc();
-        preview.style.backgroundImage = kindNow === "video" || !src ? "none" : "url(" + JSON.stringify(src) + ")";
+        var identifying = settings.kind === "auto" && !hintedKind(settings.image) &&
+          (!mediaProbe || mediaProbe.src !== settings.image || mediaProbe.status === "loading");
+        preview.style.backgroundImage = kindNow === "video" || !src || identifying ? "none" : "url(" + JSON.stringify(src) + ")";
         if (!settings.enabled) status.textContent = "背景已关闭";
         else if (kindNow === "image" && settings.image === IDB_REF) status.textContent = "当前本地文件是视频，类型请选「视频」";
-        else if (imageState && imageState.status === "error") status.textContent = kindNow === "video" ? "视频加载失败" : "图片加载失败";
+        else if (imageState && imageState.status === "error") status.textContent = imageState.error || (kindNow === "video" ? "视频加载失败" : "图片加载失败");
+        else if (identifying) status.textContent = "正在识别链接类型";
+        else if (remoteVideo && remoteVideo.src === settings.image && remoteVideo.status === "loading") status.textContent = "视频直连被限制，正在兼容加载（上限 32MB）";
+        else if (imageState && imageState.status === "blocked") status.textContent = "浏览器阻止了自动播放，点击页面后重试";
         else if (kindNow === "video" && motionReduced()) status.textContent = "系统开启了减少动态效果，视频停在第一帧";
         else if (kindNow === "video" && document.hidden) status.textContent = "页面在后台，视频已暂停";
         else if (kindNow === "video" && document.documentElement.getAttribute("data-ocbg-playing") === "on") {
