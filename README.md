@@ -6,6 +6,12 @@
 
 > 参考项目：[HaoyueQin/deepseek-harness-background](https://github.com/HaoyueQin/deepseek-harness-background)（MIT）。本插件借用了它的技术思路：固定壁纸层 + 遮罩层、按属性开关、覆盖/复用设计 token、`backdrop-filter` 毛玻璃。实现是为 OpenChamber 的 token 体系重写的，不是对原项目的直接移植。
 
+## 预览
+
+![OpenChamber 背景与毛玻璃效果](docs/screenshot.png)
+
+壁纸铺在整页背景，卡片、弹层、输入区等面板做半透明 + 毛玻璃，主题色仍由 OpenChamber 管理。
+
 ## 平台与适用范围
 
 | 项目 | 说明 |
@@ -38,6 +44,7 @@
 oc-bg/
 ├── oc-bg.js                     # 插件本体（唯一源码文件）
 ├── wallpaper.webp               # 默认壁纸（本地预设）
+├── docs/screenshot.png          # README 预览截图
 └── fonts/noto-sans-sc/          # 自托管 Noto Sans SC 变量字体（OFL-1.1，含 LICENSE）
     ├── index.css
     └── files/*.woff2
