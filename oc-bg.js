@@ -13,12 +13,13 @@
   window.__OCBG__ = true;
 
   var STORE_KEY = "ocbg.settings.v2";
-  var VERSION = "8";
+  var VERSION = "10";
   var PRESET = "https://haowallpaper.com/link/common/file/previewFileImg/16445310248537472";
   var LOCAL_PRESET = "/oc-bg-wallpaper.webp";
   var IDB_NAME = "ocbg";
   var IDB_STORE = "blobs";
   var IDB_KEY = "wallpaper";
+  var POSTER_KEY = "poster";
   var IDB_REF = "idb:wallpaper";
   var VIDEO_MAX_BYTES = 32 * 1024 * 1024;
   var VIDEO_WARN_BYTES = 12 * 1024 * 1024;
@@ -34,6 +35,7 @@
     glassBlur: 18,
     wallBlur: 0,
     fit: "cover",
+    weakPause: true,
   };
   var settings = Object.assign({}, DEFAULTS);
   var imageState;
@@ -43,6 +45,7 @@
   var mediaProbe = null;
   var pendingPlay = null;
   var remoteVideo = null;
+  var poster = null;
 
   function load() {
     try {
@@ -55,6 +58,7 @@
       settings[key] = Number.isFinite(value) ? Math.max(0, Math.min(max, value)) : DEFAULTS[key];
     });
     settings.fit = settings.fit === "contain" ? "contain" : "cover";
+    settings.weakPause = settings.weakPause !== false;
     settings.kind = settings.kind === "image" || settings.kind === "video" ? settings.kind : "auto";
     settings.image = typeof settings.image === "string" ? settings.image : PRESET;
     if (!settings.image) settings.image = PRESET;
@@ -89,23 +93,36 @@
       });
     });
   }
-  function idbGet() {
+  function idbGet(key) {
     return idbOpen().then(function (db) {
       return new Promise(function (resolve, reject) {
         var tx = db.transaction(IDB_STORE, "readonly");
-        var req = tx.objectStore(IDB_STORE).get(IDB_KEY);
+        var req = tx.objectStore(IDB_STORE).get(key || IDB_KEY);
         req.onsuccess = function () { db.close(); resolve(req.result || null); };
         req.onerror = function () { db.close(); reject(req.error); };
       });
     });
   }
-  function idbDelete() {
+  function idbPutKey(key, blob) {
+    return idbOpen().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx = db.transaction(IDB_STORE, "readwrite");
+        tx.objectStore(IDB_STORE).put(blob, key);
+        tx.oncomplete = function () { db.close(); resolve(); };
+        tx.onerror = function () { db.close(); reject(tx.error); };
+      });
+    });
+  }
+  function idbDeleteKey(key) {
     idbOpen().then(function (db) {
       var tx = db.transaction(IDB_STORE, "readwrite");
-      tx.objectStore(IDB_STORE).delete(IDB_KEY);
+      tx.objectStore(IDB_STORE).delete(key);
       tx.oncomplete = function () { db.close(); };
       tx.onerror = function () { db.close(); };
     }).catch(function () {});
+  }
+  function idbDelete() {
+    idbDeleteKey(IDB_KEY);
   }
   function forgetLocalVideo() {
     if (runtimeSrc) {
@@ -113,6 +130,54 @@
       runtimeSrc = null;
     }
     idbDelete();
+    idbDeleteKey(POSTER_KEY);
+    releasePoster();
+  }
+  function releasePoster() {
+    if (poster && poster.url) URL.revokeObjectURL(poster.url);
+    poster = null;
+  }
+  function posterUrl() { return poster && poster.url ? poster.url : ""; }
+  function refreshPosterAttr() {
+    var html = document.documentElement;
+    var video = document.querySelector(".ocbg-video");
+    if (video && posterUrl() && !html.hasAttribute("data-ocbg-playing")) html.setAttribute("data-ocbg-poster", "on");
+    else html.removeAttribute("data-ocbg-poster");
+  }
+  // First-frame poster: removes the black flash before playback and gives a
+  // still frame when the video is paused (background tab, reduced motion, weak
+  // network). Cross-origin frames without CORS taint the canvas, so capture is
+  // skipped there and the black background stands in.
+  function capturePoster(video, persist) {
+    if (poster) return;
+    if (!video.videoWidth || !video.videoHeight) return;
+    var scale = Math.min(1, 640 / Math.max(video.videoWidth, video.videoHeight));
+    var canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+    canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+    var ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    try { ctx.drawImage(video, 0, 0, canvas.width, canvas.height); }
+    catch (e) { console.info("[oc-bg] 无法生成视频海报", { reason: e.name }); return; }
+    canvas.toBlob(function (blob) {
+      if (!blob) return;
+      if (poster) return;
+      poster = { url: URL.createObjectURL(blob) };
+      var layer = document.querySelector(".ocbg-layer");
+      if (layer) layer.style.backgroundImage = "url(" + JSON.stringify(poster.url) + ")";
+      refreshPosterAttr();
+      if (persist && settings.image === IDB_REF) idbPutKey(POSTER_KEY, blob).catch(function () {});
+    }, "image/jpeg", 0.72);
+  }
+  function weakNetwork() {
+    var c = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    if (!c) return false;
+    if (c.saveData) return true;
+    return c.effectiveType === "slow-2g" || c.effectiveType === "2g";
+  }
+  function scrimPlaying() {
+    var v = settings.scrim + settings.opacity * (1 - settings.scrim);
+    return Math.max(0, Math.min(1, v));
   }
 
   function pathWithoutQuery(src) {
@@ -192,7 +257,7 @@
     "html[data-ocbg] .ocbg-layer{display:block;position:fixed;inset:0;z-index:-2;pointer-events:none;",
     "background-repeat:no-repeat;background-size:var(--ocbg-fit,cover);background-position:center;",
     "opacity:var(--ocbg-opacity,.9);filter:blur(var(--ocbg-wall-blur,0px));transform:scale(var(--ocbg-wall-scale,1));}",
-    "html[data-ocbg] .ocbg-video{position:absolute;inset:0;width:100%;height:100%;object-fit:var(--ocbg-fit,cover);object-position:center;pointer-events:none;}",
+    "html[data-ocbg] .ocbg-video{position:absolute;inset:0;width:100%;height:100%;object-fit:var(--ocbg-fit,cover);object-position:center;pointer-events:none;background:#000;}",
     "html[data-ocbg] .ocbg-scrim{display:block;position:fixed;inset:0;z-index:-1;pointer-events:none;",
     "background:var(--ocbg-scrim-color,#000);opacity:var(--ocbg-scrim,.28);}",
     "html[data-ocbg]:not(.dark) .ocbg-scrim{--ocbg-scrim-color:#fff;}",
@@ -207,17 +272,29 @@
     "html[data-ocbg-glass] .bg-muted{background-color:color-mix(in srgb,var(--muted) var(--ocbg-panel-opacity),transparent)!important;}",
     "html[data-ocbg-glass] .oc-glass-composer,html[data-ocbg-glass] .oc-glass-floating{",
     "background-color:color-mix(in srgb,var(--surface-elevated) var(--ocbg-panel-opacity),transparent)!important;}",
-    /* Limit expensive filters to actual panels, not every muted button/badge. */
-    "html[data-ocbg-glass] aside.bg-sidebar,html[data-ocbg-glass] .oc-glass-floating,",
+    /* Limit expensive filters to actual panels, not every muted button/badge.
+       The left sidebar is excluded on purpose: it animates width when collapsed,
+       and a backdrop-filter on a width-animating element re-samples its backdrop
+       every frame, which stalls the collapse. OpenChamber already ships its own
+       glass for real panels; the sidebar keeps only the translucent fill above. */
+    "html[data-ocbg-glass] .oc-glass-floating,",
     "html[data-ocbg-glass] .oc-glass-composer{",
     "-webkit-backdrop-filter:blur(var(--ocbg-glass-blur,18px)) saturate(var(--oc-glass-saturation,1));",
     "backdrop-filter:blur(var(--ocbg-glass-blur,18px)) saturate(var(--oc-glass-saturation,1));}",
     /* Playing video already updates every frame. Re-blurring it into panels, or
        filtering the video layer itself, forces a full-frame repaint and stalls scroll. */
     "html[data-ocbg-playing] .ocbg-layer{filter:none!important;transform:none!important;}",
+    /* An integer opacity keeps the playing video eligible for a hardware overlay;
+       the fade the user asked for is carried by the scrim instead. */
+    "html[data-ocbg-playing] .ocbg-video{opacity:1!important;}",
+    "html[data-ocbg-playing] .ocbg-layer{opacity:1!important;}",
+    "html[data-ocbg-playing] .ocbg-scrim{opacity:var(--ocbg-scrim-playing,var(--ocbg-scrim,.28));}",
     "html[data-ocbg-playing] aside.bg-sidebar,html[data-ocbg-playing] .oc-glass-floating,",
     "html[data-ocbg-playing] .oc-glass-composer{",
     "-webkit-backdrop-filter:none!important;backdrop-filter:none!important;}",
+    /* The sidebar never gets a filter from this plugin, playing or not. */
+    "html[data-ocbg] aside.bg-sidebar{-webkit-backdrop-filter:none!important;backdrop-filter:none!important;}",
+    "html[data-ocbg-poster] .ocbg-video{opacity:0;}",
   ].join("");
 
   function injectCss() {
@@ -283,6 +360,7 @@
     var had = html.getAttribute("data-ocbg-playing") === "on";
     if (on) html.setAttribute("data-ocbg-playing", "on");
     else html.removeAttribute("data-ocbg-playing");
+    refreshPosterAttr();
     publishStatus();
     if (had !== on && previewSync) previewSync();
   }
@@ -417,6 +495,11 @@
       setPlaying(false);
       return;
     }
+    if (settings.weakPause && weakNetwork()) {
+      if (!video.paused) video.pause();
+      setPlaying(false);
+      return;
+    }
     if (!video.paused) {
       setPlaying(true);
       return;
@@ -458,6 +541,8 @@
     var mq = window.matchMedia("(prefers-reduced-motion: reduce)");
     if (mq.addEventListener) mq.addEventListener("change", syncPlayback);
     else if (mq.addListener) mq.addListener(syncPlayback);
+    var c = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    if (c && c.addEventListener) c.addEventListener("change", syncPlayback);
   }
 
   function ensureVideo(layer, src) {
@@ -484,6 +569,7 @@
       video.onloadeddata = function () {
         if (imageState && imageState.src !== video.dataset.src) return;
         imageState = { src: video.dataset.src, status: "loaded" };
+        capturePoster(video, video.dataset.src.indexOf("blob:") === 0);
         publishStatus();
         if (previewSync) previewSync();
         syncPlayback();
@@ -491,6 +577,9 @@
       layer.appendChild(video);
     }
     if (video.dataset.src !== src) {
+      releasePoster();
+      var layer2 = document.querySelector(".ocbg-layer");
+      if (layer2) layer2.style.backgroundImage = "none";
       imageState = { src: src, status: "loading" };
       video.dataset.src = src;
       video.src = src;
@@ -534,6 +623,7 @@
     html.setAttribute("data-ocbg", "on");
     html.style.setProperty("--ocbg-opacity", String(settings.opacity));
     html.style.setProperty("--ocbg-scrim", String(settings.scrim));
+    html.style.setProperty("--ocbg-scrim-playing", String(scrimPlaying()));
     html.style.setProperty("--ocbg-glass-blur", settings.glassBlur + "px");
     html.style.setProperty("--ocbg-panel-opacity", Math.round(settings.panel * 100) + "%");
     html.style.setProperty("--ocbg-wall-blur", settings.wallBlur + "px");
@@ -551,12 +641,15 @@
     }
     if (kind === "video") {
       html.setAttribute("data-ocbg-video", "on");
-      layer.style.backgroundImage = "none";
+      layer.style.backgroundImage = posterUrl() ? "url(" + JSON.stringify(posterUrl()) + ")" : "none";
       ensureVideo(layer, src);
+      refreshPosterAttr();
       syncPlayback();
     } else {
       html.removeAttribute("data-ocbg-video");
+      html.removeAttribute("data-ocbg-poster");
       stopVideoElement();
+      releasePoster();
       layer.style.backgroundImage = "url(" + JSON.stringify(src) + ")";
       validateImage();
     }
@@ -780,6 +873,17 @@
       fit.onchange = function () { settings.fit = fit.value; save(); apply(); syncPrev(); };
       content.appendChild(row("壁纸填充", fit));
 
+      var weak = document.createElement("input");
+      weak.type = "checkbox";
+      weak.checked = settings.weakPause;
+      weak.setAttribute("aria-label", "弱网或省流量时暂停视频");
+      weak.className = "h-4 w-4 accent-primary";
+      weak.onchange = function () {
+        settings.weakPause = weak.checked;
+        save(); syncPlayback(); syncPrev();
+      };
+      content.appendChild(row("弱网时暂停视频", weak));
+
       var actions = document.createElement("div");
       actions.className = "flex flex-wrap items-center gap-2 pt-1";
       var clear = button("清除背景", "danger");
@@ -801,6 +905,7 @@
         else if (imageState && imageState.status === "blocked") status.textContent = "浏览器阻止了自动播放，点击页面后重试";
         else if (kindNow === "video" && motionReduced()) status.textContent = "系统开启了减少动态效果，视频停在第一帧";
         else if (kindNow === "video" && document.hidden) status.textContent = "页面在后台，视频已暂停";
+        else if (kindNow === "video" && settings.weakPause && weakNetwork()) status.textContent = "网络较弱或已开启省流量，视频停在首帧";
         else if (kindNow === "video" && document.documentElement.getAttribute("data-ocbg-playing") === "on") {
           status.textContent = "视频播放中。壁纸模糊和毛玻璃采样已暂停，避免每帧重绘";
         } else if (!src || !imageState || imageState.status === "loading") {
@@ -829,7 +934,11 @@
     bindPlaybackGuards();
     ui();
     if (settings.image === IDB_REF) {
-      idbGet().then(function (blob) {
+      idbGet(POSTER_KEY).then(function (blob) {
+        if (blob) poster = { url: URL.createObjectURL(blob) };
+      }).catch(function () {}).then(function () {
+        return idbGet(IDB_KEY);
+      }).then(function (blob) {
         if (!blob) {
           toast("本地视频已丢失，已恢复默认壁纸");
           settings.image = PRESET;

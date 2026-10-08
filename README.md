@@ -26,7 +26,7 @@
 - **无后缀链接也能识别**：「自动」模式先看后缀，没有后缀时用 `HEAD` 读响应的 `Content-Type` 判断是图片还是视频。
 - **防盗链兼容**：部分站点会拒绝带来源页的视频请求（返回 403）。直连失败时，会改用不带来源的受限请求（上限 32MB）读成本地 blob 再播放，不经过任何代理。站点不允许跨站读取时，会提示改用本地文件。
 - **壁纸层 + 遮罩层**：壁纸固定在 `z-index:-2`，遮罩在 `z-index:-1`；遮罩自动跟随明暗主题（浅色用白纱，深色用黑纱）。
-- **毛玻璃面板**：对卡片、弹层、侧边栏、输入区等面板做半透明 + `backdrop-filter` 模糊。
+- **毛玻璃面板**：对卡片、弹层、输入区等面板做半透明 + `backdrop-filter` 模糊。**侧边栏除外**：它在收起时动画 `width`，对宽度动画中的元素加 `backdrop-filter` 会让浏览器每帧重新采样背景，造成收起卡顿；OpenChamber 本身也有 glass 系统，侧边栏只保留半透明填充。
 - **实时调节**：壁纸不透明度、遮罩强度、面板不透明度、毛玻璃模糊、壁纸模糊、填充方式（铺满 / 完整显示）。
 - **设置持久化**：写入浏览器 `localStorage`（键 `ocbg.settings.v2`）；本地视频另存 IndexedDB。
 - **中文字形兜底**：自托管 Noto Sans SC 变量字体，给没有 CJK 字体的设备补字形。
@@ -110,7 +110,7 @@ npm root -g        # 全局 node_modules 路径，再拼 /@openchamber/web/dist
 | 壁纸不透明度 | `0–100%`，壁纸整体透明度 |
 | 遮罩 | `0–95%`，壁纸之上的可读性遮罩 |
 | 面板不透明度 | `5–100%`，面板表面透明度；`≥98%` 时关闭毛玻璃 |
-| 毛玻璃模糊 | `0–40px`，面板 `backdrop-filter` 模糊半径 |
+| 毛玻璃模糊 | `0–40px`，面板 `backdrop-filter` 模糊半径（侧边栏不受影响） |
 | 壁纸模糊 | `0–60px`，壁纸自身的模糊 |
 | 壁纸填充 | `cover`（铺满）/ `contain`（完整显示） |
 | 清除背景 | 关闭背景并恢复原始外观 |
@@ -122,7 +122,7 @@ npm root -g        # 全局 node_modules 路径，再拼 /@openchamber/web/dist
 - 用 `MutationObserver` 监听 DOM，把设置区块插到「外观」页的 `[data-settings-item="appearance.session-activity"]` 之前。
 - 设置写入 `localStorage`，启动时读取并做范围钳制。
 - 背景通过 `<html>` 上的 `data-ocbg` / `data-ocbg-glass` / `data-ocbg-playing` 属性开关，具体样式由注入的 `<style id="ocbg-style">` 提供。
-- 面板半透明用 `color-mix(in srgb, var(--token) var(--ocbg-panel-opacity), transparent)`，只在 `.bg-card`、`.bg-popover`、`.bg-sidebar` 等面板类上生效；毛玻璃滤镜只加在真正的面板上，避免给每个按钮都上滤镜。
+- 面板半透明用 `color-mix(in srgb, var(--token) var(--ocbg-panel-opacity), transparent)`，只在 `.bg-card`、`.bg-popover`、`.bg-sidebar` 等面板类上生效；毛玻璃滤镜只加在真正的面板上，避免给每个按钮都上滤镜。侧边栏 `aside.bg-sidebar` 被显式排除在 `backdrop-filter` 之外（它在收起时动画 `width`）。
 - 视频播放时置 `data-ocbg-playing`，临时关掉壁纸 `filter` 与面板 `backdrop-filter`，把合成放回浏览器默认路径，避免每帧重绘。
 - 图片经 `Image()` 预加载校验；视频直连失败时按上文的兼容路径重试。
 
